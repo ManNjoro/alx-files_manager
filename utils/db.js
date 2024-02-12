@@ -5,10 +5,9 @@ class DBClient {
     this.host = process.env.DB_HOST || 'localhost';
     this.port = process.env.DB_PORT || 27017;
     this.database = process.env.DB_DATABASE || 'files_manager';
-    this.url = `mongodb://${this.host}:${this.port}`;
+    this.url = `mongodb://${this.host}:${this.port}/${this.database}`;
     this.client = new mongodb.MongoClient(this.url, { useUnifiedTopology: true });
     this.client.connect();
-    this.db = this.client.db(this.database);
   }
 
   isAlive() {
@@ -16,11 +15,11 @@ class DBClient {
   }
 
   async nbUsers() {
-    return this.db.collection('users').countDocuments();
+    return this.client.db().collection('users').countDocuments();
   }
 
   async nbFiles() {
-    return this.db.collection('files').countDocuments();
+    return this.client.db().collection('files').countDocuments();
   }
 }
 
