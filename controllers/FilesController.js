@@ -151,6 +151,7 @@ class FilesController {
     return response.status(code).send(updatedFile);
   }
 
+  // eslint-disable-next-line consistent-return
   static async getFile(request, response) {
     const fileId = request.params.id;
     const { userId } = await userUtils.getUserIdAndKey(request);
@@ -179,7 +180,7 @@ class FilesController {
     const fileContent = fs.readFileSync(file.localPath);
 
     response.setHeader('Content-Type', mimeType);
-    return response.status(200).send(fileContent);
+    response.status(200).send(fileContent);
   }
 }
 
