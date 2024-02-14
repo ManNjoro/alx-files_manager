@@ -1,50 +1,204 @@
-/* eslint-disable import/no-named-as-default */
-/* eslint-disable no-unused-vars */
-import sha1 from 'sha1';
-import { Request } from 'express';
-import mongoDBCore from 'mongodb/lib/core';
+import { ObjectId } from 'mongodb';
+import { v4 as uuidv4 } from 'uuid';
+import { promises as fsPromises } from 'fs';
 import dbClient from './db';
-import redisClient from './redis';
+import userUtils from './user';
+import basicUtils from './essentials';
 
-export const getUserFromAuthorization = async (req) => {
-  const authorization = req.headers.authorization || null;
+const fileUtils = {
+  async validateBody(request) {
+    const {
+      name, type, isPublic = false, data,
+    } = request.body;
 
-  if (!authorization) {
-    return null;
-  }
-  const authorizationParts = authorization.split(' ');
+    let { parentId = 0 } = request.body;
 
-  if (authorizationParts.length !== 2 || authorizationParts[0] !== 'Basic') {
-    return null;
-  }
-  const token = Buffer.from(authorizationParts[1], 'base64').toString();
-  const sepPos = token.indexOf(':');
-  const email = token.substring(0, sepPos);
-  const password = token.substring(sepPos + 1);
-  const user = await (await dbClient.usersCollection()).findOne({ email });
+    const typesAllowed = ['file', 'image', 'folder'];
+    let msg = null;
 
-  if (!user || sha1(password) !== user.password) {
-    return null;
-  }
-  return user;
+    if (parentId === '0') parentId = 0;
+
+    if (!name) {
+      msg = 'Missing name';
+    } else if (!type || !typesAllowed.includes(type)) {
+      msg = 'Missing type';
+    } else if (!data && type !== 'folder') {
+      msg = 'Missing data';
+    } else if (parentId && parentId !== '0') {
+      let file;
+
+      if (basicUtils.isValidId(parentId)) {
+        file = await this.getFile({
+          _id: ObjectId(parentId),
+        });
+      } else {
+        file = null;
+      }
+
+      if (!file) {
+        msg = 'Parent not found';
+      } else if (file.type !== 'folder') {
+        msg = 'Parent is not a folder';
+      }
+    }
+
+    const obj = {
+      error: msg,
+      fileParams: {
+        name,
+        type,
+        parentId,
+        isPublic,
+        data,
+      },
+    };
+
+    return obj;
+  },
+
+  async getFile(query) {
+    const file = await dbClient.filesCollection.findOne(query);
+    return file;
+  },
+
+  async getFilesOfParentId(query) {
+    const fileList = await dbClient.filesCollection.aggregate(query);
+    return fileList;
+  },
+
+  async saveFile(userId, fileParams, FOLDER_PATH) {
+    const {
+      name, type, isPublic, data,
+    } = fileParams;
+    let { parentId } = fileParams;
+
+    if (parentId !== 0) parentId = ObjectId(parentId);
+
+    const query = {
+      userId: ObjectId(userId),
+      name,
+      type,
+      isPublic,
+      parentId,
+    };
+
+    if (fileParams.type !== 'folder') {
+      const fileNameUUID = uuidv4();
+      const fileDataDecoded = Buffer.from(data, 'base64');
+
+      const path = `${FOLDER_PATH}/${fileNameUUID}`;
+
+      query.localPath = path;
+
+      try {
+        await fsPromises.mkdir(FOLDER_PATH, { recursive: true });
+        await fsPromises.writeFile(path, fileDataDecoded);
+      } catch (err) {
+        return { error: err.message, code: 400 };
+      }
+    }
+
+    const result = await dbClient.filesCollection.insertOne(query);
+
+    const file = this.processFile(query);
+
+    const newFile = { id: result.insertedId, ...file };
+
+    return { error: null, newFile };
+  },
+
+  async updateFile(query, set) {
+    const fileList = await dbClient.filesCollection.findOneAndUpdate(
+      query,
+      set,
+      { returnOriginal: false },
+    );
+    return fileList;
+  },
+
+  async publishUnpublish(request, setPublish) {
+    const { id: fileId } = request.params;
+
+    if (!basicUtils.isValidId(fileId)) { return { error: 'Unauthorized', code: 401 }; }
+
+    const { userId } = await userUtils.getUserIdAndKey(request);
+
+    if (!basicUtils.isValidId(userId)) { return { error: 'Unauthorized', code: 401 }; }
+
+    const user = await userUtils.getUser({
+      _id: ObjectId(userId),
+    });
+
+    if (!user) return { error: 'Unauthorized', code: 401 };
+
+    const file = await this.getFile({
+      _id: ObjectId(fileId),
+      userId: ObjectId(userId),
+    });
+
+    if (!file) return { error: 'Not found', code: 404 };
+
+    const result = await this.updateFile(
+      {
+        _id: ObjectId(fileId),
+        userId: ObjectId(userId),
+      },
+      { $set: { isPublic: setPublish } },
+    );
+
+    const {
+      _id: id,
+      userId: resultUserId,
+      name,
+      type,
+      isPublic,
+      parentId,
+    } = result.value;
+
+    const updatedFile = {
+      id,
+      userId: resultUserId,
+      name,
+      type,
+      isPublic,
+      parentId,
+    };
+
+    return { error: null, code: 200, updatedFile };
+  },
+
+  processFile(doc) {
+    const file = { id: doc._id, ...doc };
+
+    delete file.localPath;
+    delete file._id;
+
+    return file;
+  },
+
+  isOwnerAndPublic(file, userId) {
+    if (
+      (!file.isPublic && !userId)
+      || (userId && file.userId.toString() !== userId && !file.isPublic)
+    ) { return false; }
+
+    return true;
+  },
+
+  async getFileData(file, size) {
+    let { localPath } = file;
+    let data;
+
+    if (size) localPath = `${localPath}_${size}`;
+
+    try {
+      data = await fsPromises.readFile(localPath);
+    } catch (err) {
+      return { error: 'Not found', code: 404 };
+    }
+
+    return { data };
+  },
 };
 
-export const getUserFromXToken = async (req) => {
-  const token = req.headers['x-token'];
-
-  if (!token) {
-    return null;
-  }
-  const userId = await redisClient.get(`auth_${token}`);
-  if (!userId) {
-    return null;
-  }
-  const user = await (await dbClient.usersCollection())
-    .findOne({ _id: new mongoDBCore.BSON.ObjectId(userId) });
-  return user || null;
-};
-
-export default {
-  getUserFromAuthorization: async (req) => getUserFromAuthorization(req),
-  getUserFromXToken: async (req) => getUserFromXToken(req),
-};
+export default fileUtils;
