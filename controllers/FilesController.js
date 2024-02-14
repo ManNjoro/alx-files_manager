@@ -1,7 +1,6 @@
 import { ObjectId } from 'mongodb';
 import mime from 'mime-types';
 import Queue from 'bull';
-import fs from 'fs';
 import userUtils from '../utils/user';
 import fileUtils from '../utils/auth';
 import essentials from '../utils/essentials';
@@ -151,36 +150,34 @@ class FilesController {
     return response.status(code).send(updatedFile);
   }
 
-  // eslint-disable-next-line consistent-return
   static async getFile(request, response) {
-    const fileId = request.params.id;
     const { userId } = await userUtils.getUserIdAndKey(request);
+    const { id: fileId } = request.params;
+    const size = request.query.size || 0;
 
-    if (!ObjectId.isValid(fileId)) {
-      return response.status(404).send({ error: 'Not found' });
-    }
+    if (!essentials.isValidId(fileId)) { return response.status(404).send({ error: 'Not found' }); }
 
     const file = await fileUtils.getFile({
       _id: ObjectId(fileId),
     });
 
-    if (!file || (!file.isPublic && (!userId || file.userId.toString() !== userId))) {
-      return response.status(404).send({ error: 'Not found' });
-    }
+    if (!file || !fileUtils.isOwnerAndPublic(file, userId)) { return response.status(404).send({ error: 'Not found' }); }
 
     if (file.type === 'folder') {
-      return response.status(400).send({ error: "A folder doesn't have content" });
+      return response
+        .status(400)
+        .send({ error: "A folder doesn't have content" });
     }
 
-    if (!fs.existsSync(file.localPath)) {
-      return response.status(404).send({ error: 'Not found' });
-    }
+    const { error, code, data } = await fileUtils.getFileData(file, size);
 
-    const mimeType = mime.lookup(file.name);
-    const fileContent = fs.readFileSync(file.localPath);
+    if (error) return response.status(code).send({ error });
+
+    const mimeType = mime.contentType(file.name);
 
     response.setHeader('Content-Type', mimeType);
-    response.status(200).send(fileContent);
+
+    return response.status(200).send(data);
   }
 }
 
